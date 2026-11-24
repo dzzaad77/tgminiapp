@@ -1,5 +1,5 @@
-import * as view from './views.js?v=3b110f5acd81';
-import {api as request,downloadAttachment} from './transport.js?v=3b110f5acd81';
+import * as view from './views.js?v=423958bde57f';
+import {api as request,downloadAttachment} from './transport.js?v=423958bde57f';
 
 const root=document.querySelector('#app');
 const terminalFiles=new Set(['clean','error','rejected']);
@@ -12,10 +12,12 @@ const commandKeys=new Map();
 const filterByPage=new Map();
 const cachedPages=new Map();
 const dockPages=new Set(['home','queue','mine','feed','profile','access']);
-const cacheablePages=new Set(['home','queue','mine','feed','profile']);
-const pageCacheMs=15000;
+const cacheablePages=new Set([...dockPages,'request','new']);
+const defaultFilters={tab:'active',q:'',status:'',offset:0};
+const pageCacheMs=45000;
 let cacheRevision=0;
 let renderedKey;
+let reading=0;
 const safeError=error=>error?.message||'Повторите попытку.';
 const defaultRoute=()=>meta.user.role==='author'?'home':'queue';
 const href=id=>'#request/'+id;
@@ -105,7 +107,7 @@ async function boot(){
 }
 
 function filters(page){
-  if(!filterByPage.has(page))filterByPage.set(page,{tab:'active',q:'',status:'',offset:0});
+  if(!filterByPage.has(page))filterByPage.set(page,{...defaultFilters});
   return filterByPage.get(page);
 }
 function formDraft(action,item){
@@ -155,9 +157,29 @@ function captureDraft(){
   draft.authors=data.getAll('authors');
   draft.links=data.getAll('links');
 }
-function pageKey(page,id='',action=''){
-  const selected=page==='mine'||page==='queue'?filters(page):{};
+function pageKey(page,id='',action='',selected=page==='mine'||page==='queue'?filters(page):{}){
   return new URLSearchParams({...selected,q:(selected.q||'').slice(0,150),page,id,action}).toString();
+}
+function cachedScreen(page,id,action,key){
+  if(page==='action'){
+    const card=cachedPages.get(pageKey('request',id));
+    if(card?.snapshot.data.entry.actions.includes(action)){
+      return {at:card.at,snapshot:{...card.snapshot,page,action}};
+    }
+  }
+  if(page==='user'&&meta?.user.role==='admin'){
+    const access=cachedPages.get(pageKey('access'));
+    const person=id==='new'?null:access?.snapshot.data.items.find(item=>item.id===id);
+    if(access&&person!==undefined){
+      return {at:access.at,snapshot:{...access.snapshot,page,id,data:{person}}};
+    }
+  }
+  return cachedPages.get(key);
+}
+function rememberScreen(key,snapshot,at){
+  if(snapshot.problem||!cacheablePages.has(snapshot.page))return;
+  if(cachedPages.size>=24&&!cachedPages.has(key))cachedPages.delete(cachedPages.keys().next().value);
+  cachedPages.set(key,{snapshot,at});
 }
 function showScreen(snapshot,key){
   const {page,id,action}=snapshot;
@@ -173,7 +195,7 @@ function showScreen(snapshot,key){
   if(draft)renderUploads();
   renderedKey=key;
 }
-async function route(initial=false){
+async function route(initial=false,refresh=false){
   if(!meta&&!initial)return;
   const version=++generation;
   captureDraft();
@@ -181,25 +203,29 @@ async function route(initial=false){
   const [raw,id='',action='']=location.hash.slice(1).split('/');
   const page=raw||(meta?defaultRoute():'default');
   const key=pageKey(page,id,action);
-  const cached=cachedPages.get(key);
-  const fresh=cached&&(renderedKey===key||Date.now()-cached.at<pageCacheMs);
-  if(fresh){
+  const cached=cachedScreen(page,id,action,key);
+  const fresh=cached&&Date.now()-cached.at<pageCacheMs;
+  const canKeep=cached&&(fresh||renderedKey===key);
+  if(canKeep){
     if(renderedKey!==key)showScreen(cached.snapshot,key);
+    if(fresh&&!refresh)return;
   }else if(meta){
     shell('<p class="boot" role="status">Загружаем…</p>',{page:dockPages.has(page)?page:'',backTo:backFor(page,id),busy:true});
   }
   const revision=cacheRevision;
+  const query=key+'&bundle=1';
+  reading++;
   try {
     let snapshot;
     try {
-      snapshot=await api('/page?'+key);
+      snapshot=await api('/page?'+query);
     }catch(error){
       if(!initial||error.status!==401)throw error;
       if(!telegram?.initData){
         shell(view.signIn(config));
         return;
       }
-      snapshot=await request('/session',{method:'POST',data:{initData:telegram.initData,screen:key}});
+      snapshot=await request('/session',{method:'POST',data:{initData:telegram.initData,screen:query}});
     }
     if(version!==generation)return;
     if(revision!==cacheRevision)return route(initial);
@@ -207,18 +233,28 @@ async function route(initial=false){
     if(roleChanged)clearPageCache();
     const keyAfter=page===snapshot.page?key:pageKey(snapshot.page,snapshot.id,snapshot.action);
     if(raw&&page!==snapshot.page)history.replaceState(null,'','#'+snapshot.page);
-    if(!snapshot.problem&&cacheablePages.has(snapshot.page)){
-      if(cachedPages.size>=20&&!cachedPages.has(keyAfter))cachedPages.delete(cachedPages.keys().next().value);
-      cachedPages.set(keyAfter,{snapshot,at:Date.now()});
+    const {bundle,...screen}=snapshot;
+    const at=Date.now();
+    if(Array.isArray(bundle)){
+      cachedPages.clear();
+      for(const {tab,...sibling} of bundle){
+        const selected=sibling.page==='mine'||sibling.page==='queue'
+          ? {...defaultFilters,tab:tab||defaultFilters.tab} : undefined;
+        const siblingKey=pageKey(sibling.page,sibling.id,sibling.action,selected);
+        rememberScreen(siblingKey,{...sibling,meta:screen.meta},at);
+      }
     }
-    if(!fresh||snapshot.problem||renderedKey!==keyAfter||JSON.stringify(cached.snapshot)!==JSON.stringify(snapshot)){
+    rememberScreen(keyAfter,screen,at);
+    if(!canKeep||screen.problem||renderedKey!==keyAfter||JSON.stringify(cached.snapshot)!==JSON.stringify(screen)){
       const search=renderedKey===key&&document.activeElement?.closest('[data-form="search"]');
-      if(!search||snapshot.problem||roleChanged)showScreen(snapshot,keyAfter);
+      if(!search||screen.problem||roleChanged)showScreen(screen,keyAfter);
     }
   }catch(error){
     if(version!==generation||revision!==cacheRevision)return;
-    if(fresh&&![401,403].includes(error.status))notify(safeError(error));
+    if(canKeep&&![401,403].includes(error.status))notify(safeError(error));
     else problem(error,true);
+  }finally{
+    reading--;
   }
 }
 
@@ -386,7 +422,7 @@ async function click(event){
         go(defaultRoute());
       }finally{sending=false;}
     }
-    if(data.retry!==undefined){ if(meta)route();else boot(); }
+    if(data.retry!==undefined){ if(meta)route(false,true);else boot(); }
     if(data.tab){ Object.assign(filters(current.page),{tab:data.tab,offset:0});route(); }
     if(data.more!==undefined){ filters(current.page).offset=Number(data.more);route(); }
     if(data.removeFile&&draft){ draft.uploads.delete(data.removeFile);renderUploads(); }
@@ -439,7 +475,9 @@ root.addEventListener('change',event=>{
   }
 });
 window.addEventListener('hashchange',()=>route());
-document.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&meta&&!sending&&['home','mine','queue','feed'].includes(current?.page))route();
-});
+function syncTabs(){
+  if(document.visibilityState==='visible'&&meta&&!sending&&!reading&&dockPages.has(current?.page))route(false,true);
+}
+document.addEventListener('visibilitychange',syncTabs);
+setInterval(syncTabs,30000);
 boot();
