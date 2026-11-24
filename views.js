@@ -1,4 +1,4 @@
-import {attachmentHref} from './transport.js?v=5a5bb474c498';
+import {attachmentHref} from './transport.js?v=800c181b1e33';
 
 export const escape = input => String(input??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const e=escape;

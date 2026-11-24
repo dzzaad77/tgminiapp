@@ -1,5 +1,5 @@
-import * as view from './views.js?v=5a5bb474c498';
-import {api as request,downloadAttachment} from './transport.js?v=5a5bb474c498';
+import * as view from './views.js?v=800c181b1e33';
+import {api as request,downloadAttachment} from './transport.js?v=800c181b1e33';
 
 const root=document.querySelector('#app');
 const terminalFiles=new Set(['clean','error','rejected']);
@@ -12,6 +12,7 @@ const commandKeys=new Map();
 const filterByPage=new Map();
 const cachedPages=new Map();
 const dockPages=new Set(['home','queue','mine','feed','profile','access']);
+const routes=new Set([...dockPages,'request','action','user','new']);
 const cacheablePages=new Set([...dockPages,'request','new']);
 const defaultFilters={tab:'active',q:'',status:'',offset:0};
 const pageCacheMs=45000;
@@ -95,10 +96,6 @@ async function boot(){
     config=await api('/config');
     if(!config.demo&&!telegram) await loadTelegram();
     setTheme();
-    const deep=telegram?.initDataUnsafe?.start_param||new URL(location.href).searchParams.get('tgWebAppStartParam');
-    if(!location.hash&&deep?.startsWith('req_')&&uuid.test(deep.slice(4))){
-      history.replaceState(null,'',href(deep.slice(4)));
-    }
     await route(true);
   }catch(error){
     if(config&&[401,403].includes(error.status))shell(view.signIn(config,safeError(error)));
@@ -181,6 +178,20 @@ function rememberScreen(key,snapshot,at){
   if(cachedPages.size>=24&&!cachedPages.has(key))cachedPages.delete(cachedPages.keys().next().value);
   cachedPages.set(key,{snapshot,at});
 }
+function readRoute(){
+  // Telegram may use the hash for launch data or append it after a route.
+  const fragment=location.hash.slice(1);
+  const queryAt=fragment.indexOf('?');
+  const path=queryAt===-1?fragment:fragment.slice(0,queryAt);
+  const parts=path.split('/');
+  if(routes.has(parts[0]))return parts;
+  const hashParams=new URLSearchParams(queryAt===-1?fragment:fragment.slice(queryAt+1));
+  const deep=telegram?.initDataUnsafe?.start_param
+    ||new URLSearchParams(location.search).get('tgWebAppStartParam')
+    ||hashParams.get('tgWebAppStartParam');
+  if(deep?.startsWith('req_')&&uuid.test(deep.slice(4)))return ['request',deep.slice(4)];
+  return [];
+}
 function showScreen(snapshot,key){
   const {page,id,action}=snapshot;
   meta=snapshot.meta;
@@ -200,7 +211,7 @@ async function route(initial=false,refresh=false,register=false){
   const version=++generation;
   captureDraft();
   draft=null; entry=null;
-  const [raw,id='',action='']=location.hash.slice(1).split('/');
+  const [raw,id='',action='']=readRoute();
   const page=raw||(meta?defaultRoute():'default');
   const key=pageKey(page,id,action);
   const cached=cachedScreen(page,id,action,key);
