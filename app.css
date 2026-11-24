@@ -24,6 +24,7 @@ button:disabled {cursor:default;opacity:.55}
 button:active:not(:disabled),a:active {filter:brightness(.91)}
 :focus-visible {outline:3px solid var(--blue);outline-offset:2px}
 [hidden] {display:none!important}
+.apps-script-bridge {position:fixed;bottom:0;left:0;width:1px;height:1px;border:0;opacity:.01;pointer-events:none}
 .app {height:100dvh; display:flex;flex-direction:column;position:relative;isolation:isolate;overflow:hidden;
   padding-top:var(--safe-top);max-width:690px;margin:auto;
   background:linear-gradient(169deg,color-mix(in srgb,var(--sheet) 38%,transparent),transparent 60%),radial-gradient(ellipse at 72% 100%,var(--wash),transparent 56%),var(--base)}

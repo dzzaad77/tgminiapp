@@ -6,6 +6,7 @@ const sessionName='habr-session:'+new URL('.',location.href).pathname;
 let token;
 try { token=sessionStorage.getItem(sessionName)||''; }catch {token='';}
 let bridge;
+let connection;
 const pending=new Map();
 
 function keep(value){
@@ -15,18 +16,35 @@ function keep(value){
     else sessionStorage.removeItem(sessionName);
   }catch { /* Some Telegram webviews disable session storage. */ }
 }
+function endpoint(){
+  let url;
+  try{ url=new URL(APPS_SCRIPT_URL); }catch { /* Configuration is required. */ }
+  if(url?.origin!=='https://script.google.com'||!/^\/(?:macros|a\/macros\/[a-z0-9.-]+)\/s\/[\w-]+\/exec$/i.test(url.pathname)){
+    throw new Error('Добавь ссылку Apps Script с /exec в config.js.');
+  }
+  return url;
+}
+async function direct(url,value,timeoutMs){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const response=await fetch(url.href,{
+      method:'POST',credentials:'omit',referrerPolicy:'no-referrer',
+      headers:{'content-type':'text/plain;charset=UTF-8'},body:JSON.stringify(value),signal:controller.signal
+    });
+    if(!response.ok)throw new Error('Apps Script вернул ошибку HTTP.');
+    return await response.json();
+  }finally {clearTimeout(timer);}
+}
 function connect(){
   if(bridge)return bridge;
   bridge=new Promise((resolve,reject)=>{
-    let url;
-    try{ url=new URL(APPS_SCRIPT_URL); }catch { /* Configuration is required. */ }
-    if(url?.origin!=='https://script.google.com'||!/^\/(?:macros|a\/macros\/[a-z0-9.-]+)\/s\/[\w-]+\/exec$/i.test(url.pathname)){
-      reject(new Error('Добавь ссылку Apps Script с /exec в config.js.'));
-      return;
-    }
+    const url=endpoint();
     const channel=crypto.randomUUID();
     const frame=document.createElement('iframe');
-    frame.hidden=true;
+    frame.className='apps-script-bridge';
+    frame.setAttribute('aria-hidden','true');
+    frame.tabIndex=-1;
     frame.title='Приложение Google Apps Script';
     url.searchParams.set('channel',channel);
     let peer;
@@ -35,14 +53,16 @@ function connect(){
       frame.remove();
       bridge=null;
       reject(new Error('Apps Script не ответил. Проверь публикацию и GITHUB_PAGES_ORIGIN.'));
-    },17000);
+    },30000);
 
     function receive(event){
       const message=event.data;
       if(!googleOrigin(event.origin)||message?.channel!==channel||!event.source)return;
-      if(message.type==='ready'&&!peer){
-        peer={window:event.source,origin:event.origin};
-        peer.window.postMessage({type:'connect',channel},peer.origin);
+      if(message.type==='ready'){
+        if(!peer)peer={window:event.source,origin:event.origin};
+        if(peer.window===event.source&&peer.origin===event.origin){
+          peer.window.postMessage({type:'connect',channel},peer.origin);
+        }
         return;
       }
       if(peer?.window!==event.source||peer.origin!==event.origin)return;
@@ -65,21 +85,46 @@ function connect(){
   });
   return bridge;
 }
-async function rpc(path,{method='GET',data,key}={}){
+async function viaFrame(value){
   const {peer,channel}=await connect();
   const id=crypto.randomUUID();
-  const result=await new Promise((resolve,reject)=>{
+  return new Promise((resolve,reject)=>{
     const timeout=setTimeout(()=>{
       pending.delete(id);
       reject(new Error('Запрос занял слишком много времени. Повтори попытку.'));
     },70000);
     pending.set(id,{resolve,timeout});
-    peer.window.postMessage({type:'rpc',channel,id,value:{path,method,data:data??null,key:key??null,token}},peer.origin);
+    peer.window.postMessage({type:'rpc',channel,id,value},peer.origin);
   });
+}
+async function selectConnection(){
+  const url=endpoint();
+  let timer;
+  const ready=(async()=>{
+    const probe=await direct(url,{path:'/config',method:'GET'},7000);
+    if(probe?.ok&&probe.data?.fileLimit===20000000)return value=>direct(url,value,70000);
+    throw new Error('Прямое подключение Apps Script недоступно.');
+  })();
+  const wait=new Promise(resolve=>{timer=setTimeout(resolve,1000);});
+  const fallback=Promise.race([wait,ready.then(()=>wait,()=>{})]).then(async()=>{
+    await connect();
+    return viaFrame;
+  });
+  try { return await Promise.any([ready,fallback]); }
+  catch(error){ throw error.errors.at(-1); }
+  finally { clearTimeout(timer); }
+}
+async function rpc(path,{method='GET',data,key}={}){
+  if(!connection){
+    connection=selectConnection().catch(error=>{connection=null;throw error;});
+  }
+  const send=await connection;
+  const session=token;
+  const result=await send({path,method,data:data??null,key:key??null,token:session});
   if(!result?.ok){
     const error=new Error(result?.error||'Apps Script временно недоступен.');
     error.status=result?.status||503;
-    if(error.status===401)keep('');
+    if(error.status===401&&token===session)keep('');
     throw error;
   }
   if(path==='/session'&&method==='POST'){
@@ -120,7 +165,7 @@ export async function api(path,options={}){
     if(!APPS_SCRIPT_URL.trim())throw new Error('Добавь ссылку Apps Script с /exec в config.js.');
     return {demo:false,fileLimit:20000000,types:['PDF','DOCX']};
   }
-  if(path==='/session'&&(!options.method||options.method==='GET')&&!token){
+  if((path==='/session'||path.startsWith('/page?'))&&(!options.method||options.method==='GET')&&!token){
     const error=new Error('Войдите в приложение.');
     error.status=401;
     throw error;

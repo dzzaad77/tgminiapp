@@ -1,20 +1,36 @@
-import * as view from './views.js';
-import {api,downloadAttachment} from './transport.js';
+import * as view from './views.js?v=3b110f5acd81';
+import {api as request,downloadAttachment} from './transport.js?v=3b110f5acd81';
 
 const root=document.querySelector('#app');
 const terminalFiles=new Set(['clean','error','rejected']);
 const uuid=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-let config, meta, telegram, current, entry, editors=[], draft, back, generation=0;
+let config, meta, telegram, current, entry, draft, back, generation=0;
 let sending=false;
 let forcedTheme;
 const drafts=new Map();
 const commandKeys=new Map();
 const filterByPage=new Map();
+const cachedPages=new Map();
+const dockPages=new Set(['home','queue','mine','feed','profile','access']);
+const cacheablePages=new Set(['home','queue','mine','feed','profile']);
+const pageCacheMs=15000;
+let cacheRevision=0;
+let renderedKey;
 const safeError=error=>error?.message||'Повторите попытку.';
 const defaultRoute=()=>meta.user.role==='author'?'home':'queue';
 const href=id=>'#request/'+id;
 const keyFor=scope=>commandKeys.get(scope)||crypto.randomUUID();
 const jsonData=element=>Object.fromEntries(new FormData(element));
+
+function clearPageCache(){
+  cachedPages.clear();
+  cacheRevision++;
+}
+async function api(path,options={}){
+  const result=await request(path,options);
+  if(options.method&&!options.file)clearPageCache();
+  return result;
+}
 
 function setTheme(){
   const dark=forcedTheme!==undefined?forcedTheme:telegram?telegram.colorScheme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
@@ -43,6 +59,7 @@ function go(hash){
   else location.hash=target;
 }
 function shell(content,{page='',backTo='',busy=false}={}){
+  renderedKey=undefined;
   back=backTo;
   if(back)telegram?.BackButton?.show();
   else telegram?.BackButton?.hide();
@@ -58,9 +75,13 @@ function notify(message){
   toast.hidden=false;
   setTimeout(()=>{toast.hidden=true;},4200);
 }
-function problem(error){
-  if(error.status===401||error.status===403&&!meta){
+function problem(error,session=false){
+  if(error.status===401||error.status===403&&(session||!meta)){
     meta=null;
+    clearPageCache();
+    drafts.clear();
+    commandKeys.clear();
+    filterByPage.clear();
     shell(view.signIn(config,safeError(error)));
     return;
   }
@@ -70,20 +91,13 @@ function problem(error){
 async function boot(){
   try{
     config=await api('/config');
-    if(!config.demo) await loadTelegram();
+    if(!config.demo&&!telegram) await loadTelegram();
     setTheme();
-    try{meta=await api('/session');}
-    catch(error){
-      if(!telegram?.initData){
-        if(error.status!==401&&error.status!==403)throw error;
-        shell(view.signIn(config));
-        return;
-      }
-      meta=await api('/session',{method:'POST',data:{initData:telegram.initData}});
-    }
     const deep=telegram?.initDataUnsafe?.start_param||new URL(location.href).searchParams.get('tgWebAppStartParam');
-    if(!location.hash&&deep?.startsWith('req_')&&uuid.test(deep.slice(4)))go(href(deep.slice(4)));
-    else route();
+    if(!location.hash&&deep?.startsWith('req_')&&uuid.test(deep.slice(4))){
+      history.replaceState(null,'',href(deep.slice(4)));
+    }
+    await route(true);
   }catch(error){
     if(config&&[401,403].includes(error.status))shell(view.signIn(config,safeError(error)));
     else problem(error);
@@ -93,13 +107,6 @@ async function boot(){
 function filters(page){
   if(!filterByPage.has(page))filterByPage.set(page,{tab:'active',q:'',status:'',offset:0});
   return filterByPage.get(page);
-}
-async function loadQueue(page){
-  const active=filters(page);
-  const params=new URLSearchParams({...active,...(page==='mine'?{mine:'1'}:{})});
-  const [result,unassigned]=await Promise.all([api('/requests?'+params),
-    page==='queue'&&meta.user.role==='admin'?api('/requests?tab=unassigned'):null]);
-  return view.queueView(meta,result,active,page,unassigned?.total);
 }
 function formDraft(action,item){
   const scope=action+'-'+(item?.id||'new');
@@ -114,43 +121,24 @@ function formDraft(action,item){
   }
   return drafts.get(scope);
 }
-async function loadView(page,id,action,version){
-  if(page==='home'){
-    if(meta.user.role!=='author')return loadQueue('queue');
-    const [list,feed]=await Promise.all([api('/requests?mine=1&status=edits'),api('/feed')]);
-    return view.home(meta,list,feed);
-  }
-  if(page==='mine'||page==='queue')return loadQueue(page);
-  if(page==='feed')return view.feedView(await api('/feed'));
+function pageContent({page,action,data}){
+  if(page==='home')return view.home(meta,data.list,data.activity);
+  if(page==='mine'||page==='queue')return view.queueView(meta,data.list,filters(page),page,data.unassigned);
+  if(page==='feed')return view.feedView(data);
   if(page==='profile')return view.profileView(meta);
-  if(page==='access')return view.accessView(meta,await api('/admin/users'));
-  if(page==='user'){
-    const {items}=await api('/admin/users');
-    const person=items.find(user=>user.id===id);
-    if(id!=='new'&&!person)throw new Error('Участник недоступен.');
-    return view.userView(person);
-  }
+  if(page==='access')return view.accessView(meta,data);
+  if(page==='user')return view.userView(data.person);
   if(page==='new'){
-    if(!meta.user.canSubmit || !meta.accepting)throw new Error('Приём новых заявок недоступен.');
     draft=formDraft('new',null);
     return view.editorForm(meta,null,'new',draft);
   }
-  if(!['request','action'].includes(page)||!uuid.test(id))throw new Error('Заявка недоступна.');
-  const loaded=await api('/requests/'+id);
-  if(version!==generation)return '';
-  entry=loaded;
+  entry=data.entry;
   if(page==='request')return view.requestView(entry);
-  if(!entry.actions.includes(action))throw new Error('Действие недоступно в текущем статусе.');
   if(['edit','resubmit'].includes(action)){
     draft=formDraft(action,entry);
     return view.editorForm(meta,entry,action,draft);
   }
-  if(action==='assign'){
-    const available=await api('/editors');
-    if(version!==generation)return '';
-    editors=available.items;
-  }
-  return view.actionForm(entry,action,editors,meta.user);
+  return view.actionForm(entry,action,data.editors,meta.user);
 }
 function backFor(page,id){
   if(page==='request')return meta.user.role==='author'?'#mine':'#queue';
@@ -167,31 +155,70 @@ function captureDraft(){
   draft.authors=data.getAll('authors');
   draft.links=data.getAll('links');
 }
-async function route(){
-  if(!meta)return;
+function pageKey(page,id='',action=''){
+  const selected=page==='mine'||page==='queue'?filters(page):{};
+  return new URLSearchParams({...selected,q:(selected.q||'').slice(0,150),page,id,action}).toString();
+}
+function showScreen(snapshot,key){
+  const {page,id,action}=snapshot;
+  meta=snapshot.meta;
+  current={page,id,action};
+  if(snapshot.problem){
+    problem(snapshot.problem);
+    return;
+  }
+  const scroll=renderedKey===key?root.querySelector('.scroll')?.scrollTop:0;
+  shell(pageContent(snapshot),{page:dockPages.has(page)?page:'',backTo:backFor(page,id)});
+  root.querySelector('.scroll').scrollTop=scroll||0;
+  if(draft)renderUploads();
+  renderedKey=key;
+}
+async function route(initial=false){
+  if(!meta&&!initial)return;
   const version=++generation;
   captureDraft();
-  draft=null; entry=null; editors=[];
-  const [raw,id,action]=location.hash.slice(1).split('/');
-  const page=raw||defaultRoute();
-  current={page,id,action};
-  const dock=['home','queue','mine','feed','profile','access'].includes(page)?page:'';
-  const backTo=backFor(page,id);
-  shell('<p class="boot" role="status">Загружаем…</p>',{page:dock,backTo,busy:true});
+  draft=null; entry=null;
+  const [raw,id='',action='']=location.hash.slice(1).split('/');
+  const page=raw||(meta?defaultRoute():'default');
+  const key=pageKey(page,id,action);
+  const cached=cachedPages.get(key);
+  const fresh=cached&&(renderedKey===key||Date.now()-cached.at<pageCacheMs);
+  if(fresh){
+    if(renderedKey!==key)showScreen(cached.snapshot,key);
+  }else if(meta){
+    shell('<p class="boot" role="status">Загружаем…</p>',{page:dockPages.has(page)?page:'',backTo:backFor(page,id),busy:true});
+  }
+  const revision=cacheRevision;
   try {
-    const state=await api('/session');
-    if(version!==generation)return;
-    meta=state;
-    if((page==='home'&&meta.user.role!=='author')||(page==='queue'&&meta.user.role==='author')){
-      go(defaultRoute());
-      return;
+    let snapshot;
+    try {
+      snapshot=await api('/page?'+key);
+    }catch(error){
+      if(!initial||error.status!==401)throw error;
+      if(!telegram?.initData){
+        shell(view.signIn(config));
+        return;
+      }
+      snapshot=await request('/session',{method:'POST',data:{initData:telegram.initData,screen:key}});
     }
-    const content=await loadView(page,id,action,version);
     if(version!==generation)return;
-    shell(content,{page:dock,backTo});
-    if(draft)renderUploads();
+    if(revision!==cacheRevision)return route(initial);
+    const roleChanged=meta&&meta.user.role!==snapshot.meta.user.role;
+    if(roleChanged)clearPageCache();
+    const keyAfter=page===snapshot.page?key:pageKey(snapshot.page,snapshot.id,snapshot.action);
+    if(raw&&page!==snapshot.page)history.replaceState(null,'','#'+snapshot.page);
+    if(!snapshot.problem&&cacheablePages.has(snapshot.page)){
+      if(cachedPages.size>=20&&!cachedPages.has(keyAfter))cachedPages.delete(cachedPages.keys().next().value);
+      cachedPages.set(keyAfter,{snapshot,at:Date.now()});
+    }
+    if(!fresh||snapshot.problem||renderedKey!==keyAfter||JSON.stringify(cached.snapshot)!==JSON.stringify(snapshot)){
+      const search=renderedKey===key&&document.activeElement?.closest('[data-form="search"]');
+      if(!search||snapshot.problem||roleChanged)showScreen(snapshot,keyAfter);
+    }
   }catch(error){
-    if(version===generation)problem(error);
+    if(version!==generation||revision!==cacheRevision)return;
+    if(fresh&&![401,403].includes(error.status))notify(safeError(error));
+    else problem(error,true);
   }
 }
 
@@ -411,7 +438,7 @@ root.addEventListener('change',event=>{
     event.target.value='';
   }
 });
-window.addEventListener('hashchange',route);
+window.addEventListener('hashchange',()=>route());
 document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='visible'&&meta&&!sending&&['home','mine','queue','feed'].includes(current?.page))route();
 });
