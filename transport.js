@@ -124,6 +124,7 @@ async function rpc(path,{method='GET',data,key}={}){
   if(!result?.ok){
     const error=new Error(result?.error||'Apps Script временно недоступен.');
     error.status=result?.status||503;
+    error.code=result?.code;
     if(error.status===401&&token===session)keep('');
     throw error;
   }

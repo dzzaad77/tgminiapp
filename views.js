@@ -1,4 +1,4 @@
-import {attachmentHref} from './transport.js?v=423958bde57f';
+import {attachmentHref} from './transport.js?v=5a5bb474c498';
 
 export const escape = input => String(input??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const e=escape;
@@ -45,6 +45,13 @@ export function signIn(config,message='') {
     (message?note('Вход недоступен',message,'red'):'')+
     (config.demo?group('Выберите профиль',profiles.map(([id,name,role])=>'<button class="list-row" data-demo="'+id+'"><span class="avatar">'+e(nameInitials(name))+'</span><span><strong>'+name+'</strong><small>'+role+'</small></span>'+icon('chevron-right',16)+'</button>').join('')):
       note('Войдите через Telegram','Откройте Mini App из меню бота или по его ссылке.'));
+}
+
+export function registration(message=''){
+  return heading('Регистрация','Войдите через Telegram, чтобы отправлять статьи в редакцию Сбер × Хабр.')+
+    '<section class="hero"><h2>Аккаунт автора</h2><p>Используем имя из вашего профиля Telegram.</p>'+
+    (message?'<p role="alert">'+e(message)+'</p>':'')+
+    '<button type="button" class="button primary" data-register>Войти через Telegram</button></section>';
 }
 
 function requestRow(entry,description) {

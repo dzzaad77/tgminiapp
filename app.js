@@ -1,5 +1,5 @@
-import * as view from './views.js?v=423958bde57f';
-import {api as request,downloadAttachment} from './transport.js?v=423958bde57f';
+import * as view from './views.js?v=5a5bb474c498';
+import {api as request,downloadAttachment} from './transport.js?v=5a5bb474c498';
 
 const root=document.querySelector('#app');
 const terminalFiles=new Set(['clean','error','rejected']);
@@ -195,7 +195,7 @@ function showScreen(snapshot,key){
   if(draft)renderUploads();
   renderedKey=key;
 }
-async function route(initial=false,refresh=false){
+async function route(initial=false,refresh=false,register=false){
   if(!meta&&!initial)return;
   const version=++generation;
   captureDraft();
@@ -216,16 +216,17 @@ async function route(initial=false,refresh=false){
   const query=key+'&bundle=1';
   reading++;
   try {
+    const telegramSignIn=()=>request('/session',{method:'POST',data:{initData:telegram.initData,screen:query,register}});
     let snapshot;
     try {
-      snapshot=await api('/page?'+query);
+      snapshot=register?await telegramSignIn():await api('/page?'+query);
     }catch(error){
-      if(!initial||error.status!==401)throw error;
+      if(register||!initial||error.status!==401)throw error;
       if(!telegram?.initData){
         shell(view.signIn(config));
         return;
       }
-      snapshot=await request('/session',{method:'POST',data:{initData:telegram.initData,screen:query}});
+      snapshot=await telegramSignIn();
     }
     if(version!==generation)return;
     if(revision!==cacheRevision)return route(initial);
@@ -251,7 +252,9 @@ async function route(initial=false,refresh=false){
     }
   }catch(error){
     if(version!==generation||revision!==cacheRevision)return;
-    if(canKeep&&![401,403].includes(error.status))notify(safeError(error));
+    if(error.code==='registration_required')shell(view.registration());
+    else if(register&&error.status!==403)shell(view.registration(safeError(error)));
+    else if(canKeep&&![401,403].includes(error.status))notify(safeError(error));
     else problem(error,true);
   }finally{
     reading--;
@@ -414,6 +417,15 @@ async function click(event){
   if(!control)return;
   const data=control.dataset;
   try{
+    if(data.register!==undefined){
+      if(sending||!telegram?.initData)return;
+      sending=true;
+      control.disabled=true;
+      control.textContent='Входим…';
+      root.setAttribute('aria-busy','true');
+      try{await route(true,false,true);}finally{sending=false;}
+      return;
+    }
     if(data.demo){
       if(sending)return;
       sending=true;
