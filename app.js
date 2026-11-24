@@ -1,5 +1,5 @@
-import * as view from './views.js?v=800c181b1e33';
-import {api as request,downloadAttachment} from './transport.js?v=800c181b1e33';
+import * as view from './views.js?v=337bcdfb4ccc';
+import {api as request,downloadAttachment} from './transport.js?v=337bcdfb4ccc';
 
 const root=document.querySelector('#app');
 const terminalFiles=new Set(['clean','error','rejected']);
@@ -13,6 +13,8 @@ const filterByPage=new Map();
 const cachedPages=new Map();
 const dockPages=new Set(['home','queue','mine','feed','profile','access']);
 const routes=new Set([...dockPages,'request','action','user','new']);
+const launchQuery=new URLSearchParams(location.search);
+const launchData=fragmentParams().get('tgWebAppData')||launchQuery.get('tgWebAppData');
 const cacheablePages=new Set([...dockPages,'request','new']);
 const defaultFilters={tab:'active',q:'',status:'',offset:0};
 const pageCacheMs=45000;
@@ -24,6 +26,15 @@ const defaultRoute=()=>meta.user.role==='author'?'home':'queue';
 const href=id=>'#request/'+id;
 const keyFor=scope=>commandKeys.get(scope)||crypto.randomUUID();
 const jsonData=element=>Object.fromEntries(new FormData(element));
+
+function fragmentParams(){
+  const fragment=location.hash.slice(1);
+  return new URLSearchParams(fragment.slice(fragment.indexOf('?')+1));
+}
+function initData(){
+  // The URL contains the same signed payload used by the SDK. The backend validates it.
+  return launchData||telegram?.initData||'';
+}
 
 function clearPageCache(){
   cachedPages.clear();
@@ -45,16 +56,24 @@ function setTheme(){
 async function loadTelegram(){
   await new Promise(resolve=>{
     const script=document.createElement('script');
-    script.src='https://telegram.org/js/telegram-web-app.js';
-    const timeout=setTimeout(resolve,6000);
-    script.onload=script.onerror=()=>{clearTimeout(timeout);resolve();};
+    script.src='https://telegram.org/js/telegram-web-app.js?65';
+    let late=false;
+    const timeout=setTimeout(()=>{late=true;resolve();},6000);
+    script.onerror=()=>{clearTimeout(timeout);resolve();};
+    script.onload=()=>{
+      clearTimeout(timeout);
+      resolve();
+      telegram=window.Telegram?.WebApp;
+      telegram?.ready?.();
+      telegram?.expand?.();
+      telegram?.BackButton?.onClick(()=>{if(back)go(back);});
+      telegram?.onEvent?.('themeChanged',setTheme);
+      if(back)telegram?.BackButton?.show();
+      setTheme();
+      if(late&&initData()&&!meta&&!reading&&root.querySelector('[data-telegram-link]'))route(true);
+    };
     document.head.append(script);
   });
-  telegram=window.Telegram?.WebApp;
-  telegram?.ready?.();
-  telegram?.expand?.();
-  telegram?.BackButton?.onClick(()=>{if(back)go(back);});
-  telegram?.onEvent?.('themeChanged',setTheme);
 }
 function go(hash){
   const target=hash.startsWith('#')?hash:'#'+hash;
@@ -94,7 +113,10 @@ function problem(error,session=false){
 async function boot(){
   try{
     config=await api('/config');
-    if(!config.demo&&!telegram) await loadTelegram();
+    if(!config.demo&&!telegram){
+      const sdk=loadTelegram();
+      if(!launchData)await sdk;
+    }
     setTheme();
     await route(true);
   }catch(error){
@@ -185,10 +207,9 @@ function readRoute(){
   const path=queryAt===-1?fragment:fragment.slice(0,queryAt);
   const parts=path.split('/');
   if(routes.has(parts[0]))return parts;
-  const hashParams=new URLSearchParams(queryAt===-1?fragment:fragment.slice(queryAt+1));
   const deep=telegram?.initDataUnsafe?.start_param
-    ||new URLSearchParams(location.search).get('tgWebAppStartParam')
-    ||hashParams.get('tgWebAppStartParam');
+    ||launchQuery.get('tgWebAppStartParam')
+    ||fragmentParams().get('tgWebAppStartParam');
   if(deep?.startsWith('req_')&&uuid.test(deep.slice(4)))return ['request',deep.slice(4)];
   return [];
 }
@@ -227,13 +248,14 @@ async function route(initial=false,refresh=false,register=false){
   const query=key+'&bundle=1';
   reading++;
   try {
-    const telegramSignIn=()=>request('/session',{method:'POST',data:{initData:telegram.initData,screen:query,register}});
+    const signedData=initData();
+    const telegramSignIn=()=>request('/session',{method:'POST',data:{initData:signedData,screen:query,register}});
     let snapshot;
     try {
       snapshot=register?await telegramSignIn():await api('/page?'+query);
     }catch(error){
       if(register||!initial||error.status!==401)throw error;
-      if(!telegram?.initData){
+      if(!signedData){
         shell(view.signIn(config));
         return;
       }
@@ -264,7 +286,7 @@ async function route(initial=false,refresh=false,register=false){
   }catch(error){
     if(version!==generation||revision!==cacheRevision)return;
     if(error.code==='registration_required')shell(view.registration());
-    else if(register&&error.status!==403)shell(view.registration(safeError(error)));
+    else if(register&&![401,403].includes(error.status))shell(view.registration(safeError(error)));
     else if(canKeep&&![401,403].includes(error.status))notify(safeError(error));
     else problem(error,true);
   }finally{
@@ -429,7 +451,7 @@ async function click(event){
   const data=control.dataset;
   try{
     if(data.register!==undefined){
-      if(sending||!telegram?.initData)return;
+      if(sending||!initData())return;
       sending=true;
       control.disabled=true;
       control.textContent='Входим…';
@@ -446,6 +468,11 @@ async function click(event){
       }finally{sending=false;}
     }
     if(data.retry!==undefined){ if(meta)route(false,true);else boot(); }
+    if(data.telegramLink!==undefined&&telegram?.openTelegramLink){
+      telegram.openTelegramLink(control.href);
+      event.preventDefault();
+      return;
+    }
     if(data.tab){ Object.assign(filters(current.page),{tab:data.tab,offset:0});route(); }
     if(data.more!==undefined){ filters(current.page).offset=Number(data.more);route(); }
     if(data.removeFile&&draft){ draft.uploads.delete(data.removeFile);renderUploads(); }

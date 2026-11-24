@@ -1,4 +1,4 @@
-import {attachmentHref} from './transport.js?v=800c181b1e33';
+import {attachmentHref} from './transport.js?v=337bcdfb4ccc';
 
 export const escape = input => String(input??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const e=escape;
@@ -44,7 +44,8 @@ export function signIn(config,message='') {
   return heading('Редакция на Хабре',config.demo?'Локальная демонстрация':'Подача и согласование статей корпоративного блога.')+
     (message?note('Вход недоступен',message,'red'):'')+
     (config.demo?group('Выберите профиль',profiles.map(([id,name,role])=>'<button class="list-row" data-demo="'+id+'"><span class="avatar">'+e(nameInitials(name))+'</span><span><strong>'+name+'</strong><small>'+role+'</small></span>'+icon('chevron-right',16)+'</button>').join('')):
-      note('Войдите через Telegram','Откройте Mini App из меню бота или по его ссылке.'));
+      '<section class="hero"><h2>Вход через Telegram</h2><p>Откройте приложение по кнопке ниже или из меню бота @SberHabrbot.</p>'+
+      '<a class="button primary" href="https://t.me/SberHabrbot?startapp" data-telegram-link>Открыть Mini App</a></section>');
 }
 
 export function registration(message=''){
